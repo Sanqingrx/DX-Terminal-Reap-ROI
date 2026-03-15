@@ -98,7 +98,7 @@ def _make_entry(parent, var, bg="#0f3460"):
 class MonitorApp:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("Terminal Monitor v2")
+        self.root.title("DX Terminal Reap ROI")
         self.root.attributes("-topmost", True)
         self.root.attributes("-alpha", 0.85)
         self.root.overrideredirect(True)
@@ -131,7 +131,7 @@ class MonitorApp:
         # Title bar
         title_frame = tk.Frame(self.root, bg=header_bg)
         title_frame.pack(fill="x")
-        tk.Label(title_frame, text=" Terminal Monitor v2", font=("Consolas", 10, "bold"),
+        tk.Label(title_frame, text=" DX Terminal Reap ROI", font=("Consolas", 10, "bold"),
                  bg=header_bg, fg="#00d2ff", anchor="w").pack(side="left", padx=5)
         tk.Button(title_frame, text="X", font=("Consolas", 8, "bold"),
                   bg=header_bg, fg="#ff4444", bd=0, command=self._on_close).pack(side="right", padx=5)
