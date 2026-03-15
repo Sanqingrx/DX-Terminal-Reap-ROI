@@ -1,10 +1,11 @@
 """
-Terminal Markets Monitor v2
+DX Terminal Reap ROI
 Transparent floating window - POOPCOIN + SLOP / HOTDOGZ / HOLE columns
 Each reap token has its own editable holding % and reap gain %.
 """
 import tkinter as tk
 from urllib.request import urlopen, Request
+from concurrent.futures import ThreadPoolExecutor
 import json
 import threading
 import time
@@ -48,12 +49,13 @@ def fetch_json(url, data=None):
 def get_mcap(contract):
     url = DEXSCREENER_API.format(contract)
     data = fetch_json(url)
-    pairs = data.get("pairs", [])
+    pairs = data.get("pairs") or []
     if pairs:
-        mcap = pairs[0].get("marketCap") or pairs[0].get("fdv", 0)
-        price = float(pairs[0].get("priceUsd", 0))
+        raw_mcap = pairs[0].get("marketCap") or pairs[0].get("fdv") or 0
+        mcap = float(raw_mcap)
+        price = float(pairs[0].get("priceUsd") or 0)
         return mcap, price
-    return 0, 0
+    return 0.0, 0.0
 
 
 def get_token_balance(contract, holder):
@@ -76,13 +78,29 @@ def get_decimals(contract):
     return int(result.get("result", "0x12"), 16)
 
 
+# Cache: {(contract, addr): last_known_balance}
+_balance_cache = {}
+
+
+def get_balance_with_retry(contract, addr, retries=2):
+    """Fetch balance with retry; fall back to cached value on failure."""
+    key = (contract.lower(), addr.lower())
+    for attempt in range(retries + 1):
+        try:
+            bal = get_token_balance(contract, addr)
+            _balance_cache[key] = bal
+            return bal
+        except Exception:
+            if attempt < retries:
+                time.sleep(0.5)
+    # All retries failed — use cached value
+    return _balance_cache.get(key, 0)
+
+
 def get_excluded_pct(contract, decimals):
     total = 0
     for addr in EXCLUDE_ADDRESSES:
-        try:
-            total += get_token_balance(contract, addr)
-        except Exception:
-            pass
+        total += get_balance_with_retry(contract, addr)
     return (total / (10 ** decimals)) / TOTAL_SUPPLY
 
 
@@ -90,9 +108,22 @@ def _make_entry(parent, var, bg="#0f3460"):
     e = tk.Entry(parent, textvariable=var, font=("Consolas", 9), width=7,
                  bg=bg, fg="#fff", insertbackground="#fff", bd=1, relief="solid",
                  justify="center")
-    e.bind("<Button-1>", lambda ev: ev.widget.focus_set() or "break")
+
+    def _on_click(ev):
+        ev.widget.focus_set()
+        return "break"
+
+    e.bind("<Button-1>", _on_click)
     e.bind("<B1-Motion>", lambda ev: "break")
     return e
+
+
+def _fetch_token_data(name, contract, decimals):
+    """Fetch mcap + excluded pct for a single token (used in thread pool)."""
+    mcap, price = get_mcap(contract)
+    excl = get_excluded_pct(contract, decimals)
+    return name, {"mcap": mcap, "price": price,
+                  "user_holdings": 1.0 - excl, "excluded_pct": excl}
 
 
 class MonitorApp:
@@ -249,28 +280,43 @@ class MonitorApp:
             try:
                 self._fetch_and_update()
             except Exception as e:
-                self.root.after(0, lambda e=e: self.status_label.config(
-                    text=f"Error: {str(e)[:50]}"))
+                if self.running:
+                    try:
+                        self.root.after(0, lambda e=e: self.status_label.config(
+                            text=f"Error: {str(e)[:50]}"))
+                    except Exception:
+                        pass
             time.sleep(REFRESH_INTERVAL)
 
     def _fetch_and_update(self):
-        poop_mcap, poop_price = get_mcap(POOPCOIN_CONTRACT)
+        if not self.running:
+            return
 
-        tokens_data = {}
-        for name, contract, _ in REAP_TOKENS:
-            mcap, price = get_mcap(contract)
-            decimals = self.token_decimals.get(name, 18)
-            excl = get_excluded_pct(contract, decimals)
-            tokens_data[name] = {
-                "mcap": mcap, "price": price,
-                "user_holdings": 1.0 - excl, "excluded_pct": excl,
-            }
+        # Fetch POOPCOIN + all reap tokens in parallel
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            poop_future = pool.submit(get_mcap, POOPCOIN_CONTRACT)
+            token_futures = [
+                pool.submit(_fetch_token_data, name, contract,
+                            self.token_decimals.get(name, 18))
+                for name, contract, _ in REAP_TOKENS
+            ]
+
+            poop_mcap, poop_price = poop_future.result()
+            tokens_data = {}
+            for f in token_futures:
+                name, data = f.result()
+                tokens_data[name] = data
 
         self._last_data = {
             "poop_mcap": poop_mcap, "poop_price": poop_price,
             "tokens": tokens_data,
         }
-        self.root.after(0, self._update_ui)
+
+        if self.running:
+            try:
+                self.root.after(0, self._update_ui)
+            except Exception:
+                pass
 
     def _update_ui(self):
         if not self._last_data:
